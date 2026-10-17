@@ -35,7 +35,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid 
 </style></head><body>
 <div class="card">
 <h1>{{ S.title }}</h1>
-<div class="sub">{{ now }} · {{ S.connector }}: {{ meta.connector }} · {{ S.n_cases }}: {{ agg.n_cases }} · {{ S.judge }}: {{ meta.judge }}</div>
+<div class="sub">{{ now }} · {{ S.connector }}: {{ meta.connector }} · {{ S.n_cases }}: {{ agg.n_cases }} · {{ S.judge }}: {{ meta.judge }} · {{ S.judge_fallbacks }}: {{ meta.get('judge_fallbacks', 0) }} · {{ S.judge_errors }}: {{ meta.get('judge_errors', 0) }}</div>
 <div style="display:flex;gap:20px;align-items:center;margin-top:12px;flex-wrap:wrap">
 <div><div class="total">{{ agg.total }}</div><div class="sub">{{ S.total }}</div></div>
 <div>{{ radar|safe }}</div>
@@ -121,8 +121,12 @@ def render(result: CheckupResult, lang: str = "zh", version: str = "0.1.0") -> s
 
 
 def write_report(result: CheckupResult, path: str, lang: str = "zh", version: str = "0.1.0") -> str:
+    from pathlib import Path
+
     from . import __version__
     html_text = render(result, lang=lang, version=version or __version__)
-    with open(path, "w", encoding="utf-8") as f:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
         f.write(html_text)
     return path

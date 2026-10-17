@@ -8,6 +8,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from rag_checkup.connectors.mock import MockConnector, DOCS
+from rag_checkup.connectors.fastgpt import FastGPTConnector
+from rag_checkup import cli
 from rag_checkup.models import QAResult, Question, RetrievedChunk
 from rag_checkup.pipeline import run_checkup
 from rag_checkup.question_gen import QuestionGenerator, make_litellm_callback
@@ -80,17 +82,105 @@ def test_litellm_components_receive_explicit_key_without_network():
     assert judge_llm.calls[0]["api_key"] == "test-key"
 
 
+def test_cli_model_is_passed_to_question_generator_and_judge(monkeypatch):
+    calls = {}
+
+    def fake_callback(*, model, api_key):
+        calls["generator_model"] = model
+        calls["generator_key"] = api_key
+        return lambda prompt: ""
+
+    class FakeJudge:
+        def __init__(self, *, model, api_key):
+            calls["judge_model"] = model
+            calls["judge_key"] = api_key
+
+    monkeypatch.setenv("RAGCHECKUP_LLM_KEY", "test-key")
+    monkeypatch.setattr(cli, "make_litellm_callback", fake_callback)
+    monkeypatch.setattr(cli, "LiteLLMJudge", FakeJudge)
+
+    generator, judge = cli._llm_components(True, model="provider/custom-model")
+
+    assert generator.llm is not None
+    assert isinstance(judge, FakeJudge)
+    assert calls == {
+        "generator_model": "provider/custom-model",
+        "generator_key": "test-key",
+        "judge_model": "provider/custom-model",
+        "judge_key": "test-key",
+    }
+
+
 def test_litellm_judge_runtime_failure_uses_heuristic_fallback():
     class FailingLiteLLM:
         def completion(self, **kwargs):
             raise RuntimeError("offline")
 
-    judged = LiteLLMJudge(litellm_module=FailingLiteLLM()).judge(
+    judge = LiteLLMJudge(litellm_module=FailingLiteLLM())
+    judged = judge.judge(
         "correctness", "答案包含 18 小时", "18 小时"
     )
 
     assert judged["score"] == 100
     assert "参考答案" in judged["reason"]
+    assert "fallback" in judged["reason"]
+    assert judge.fallback_count == 1
+    assert judge.error_count == 1
+
+
+def test_litellm_judge_out_of_range_score_falls_back_and_stays_in_range():
+    class OutOfRangeLiteLLM:
+        def completion(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='{"score": 1000, "reason": "bad"}')
+                )]
+            )
+
+    judge = LiteLLMJudge(litellm_module=OutOfRangeLiteLLM())
+    judged = judge.judge("correctness", "答案包含 18 小时", "18 小时")
+
+    assert 0 <= judged["score"] <= 100
+    assert judged["score"] == 100  # heuristic fallback, not the invalid 1000
+    assert "error/fallback" in judged["reason"]
+    assert judge.fallback_count == 1
+    assert judge.error_count == 1
+
+
+def test_pipeline_records_judge_fallbacks_and_report_exposes_them():
+    class OutOfRangeLiteLLM:
+        def completion(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content='{"score": 1000, "reason": "bad"}')
+                )]
+            )
+
+    result = run_checkup(
+        MockConnector(), n_per_doc=1,
+        judge=LiteLLMJudge(litellm_module=OutOfRangeLiteLLM()),
+    )
+
+    assert result.meta["judge_fallbacks"] > 0
+    assert result.meta["judge_errors"] == result.meta["judge_fallbacks"]
+    assert all(0 <= score <= 100 for case in result.cases for score in case.scores.values())
+    report = render(result)
+    assert "裁判回退次数" in report
+    assert str(result.meta["judge_fallbacks"]) in report
+
+
+def test_pipeline_records_provider_failures_in_meta():
+    class FailingLiteLLM:
+        def completion(self, **kwargs):
+            raise RuntimeError("offline provider")
+
+    result = run_checkup(
+        MockConnector(), n_per_doc=1,
+        judge=LiteLLMJudge(litellm_module=FailingLiteLLM()),
+    )
+
+    assert result.meta["judge_fallbacks"] > 0
+    assert result.meta["judge_errors"] > 0
 
 
 def test_mock_behaviors():
@@ -152,6 +242,17 @@ def test_pipeline_end_to_end():
     assert result.suggestions, "应有调参建议"
 
 
+@pytest.mark.parametrize("kwargs", [{"n_per_doc": 0}, {"n_per_doc": -1}, {"top_k": 0}, {"top_k": -1}])
+def test_pipeline_rejects_non_positive_sampling_options(kwargs):
+    with pytest.raises(RuntimeError, match="positive integer"):
+        run_checkup(MockConnector(), **kwargs)
+
+
+def test_pipeline_rejects_empty_question_set():
+    with pytest.raises(RuntimeError, match="question set is empty"):
+        run_checkup(MockConnector(), questions=[])
+
+
 def test_suggestions_rules():
     result = run_checkup(MockConnector(), n_per_doc=3)
     titles = [s["title"] for s in result.suggestions]
@@ -169,6 +270,52 @@ def test_report_renders(tmp_path):
     with open(p, encoding="utf-8") as f:
         en = f.read()
     assert "RAG Health Checkup Report" in en
+
+
+def test_write_report_creates_missing_parent_directories(tmp_path):
+    result = run_checkup(MockConnector(), n_per_doc=1)
+    p = tmp_path / "nested" / "reports" / "checkup.html"
+    write_report(result, p)
+    assert p.is_file()
+
+
+def test_fastgpt_citation_ids_are_global_across_quote_groups(monkeypatch):
+    payload = {
+        "choices": [{"message": {"content": "答案"}}],
+        "responseData": [
+            {"quoteList": [{"id": "a", "text": "第一段", "score": 0.9},
+                           {"id": "b", "text": "第二段", "score": 0.8}]},
+            {"quoteList": [{"id": "c", "text": "第三段", "score": 0.7}]},
+        ],
+    }
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("rag_checkup.connectors.fastgpt.httpx.Client", FakeClient)
+    connector = FastGPTConnector(api_key="test-key")
+    _, chunks, citations = connector.query("问题")
+
+    assert len(chunks) == 3
+    assert citations == ["chunk-1", "chunk-2", "chunk-3"]
+    assert len(citations) == len(set(citations))
 
 
 def test_ab_compare():

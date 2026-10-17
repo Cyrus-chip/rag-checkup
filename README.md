@@ -23,7 +23,7 @@ rag-checkup demo   # 内置 mock 知识库,零 key 跑通全流程,生成 report
 或者 Docker：
 
 ```bash
-docker run --rm -v $(pwd):/out rag-checkup demo --out /out/report.html
+docker run --rm --user "$(id -u):$(id -g)" -v $(pwd):/out rag-checkup demo --out /out/report.html
 ```
 
 ## 连真实知识库
@@ -50,6 +50,8 @@ rag-checkup demo --lang en
 pip install "rag-checkup[llm]"
 export RAGCHECKUP_LLM_KEY="your-provider-key"
 rag-checkup demo --llm
+# 指定同一个模型用于 LLM 出题与裁判
+rag-checkup demo --llm --model gpt-4o-mini
 ```
 
 `--llm` 会让 LiteLLM 同时负责生成测试题和裁判；`RAGCHECKUP_LLM_KEY`

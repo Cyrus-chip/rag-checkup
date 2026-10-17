@@ -18,7 +18,7 @@ from .scoring import HeuristicJudge, LiteLLMJudge
 app = typer.Typer(help="10 分钟给知识库问答做一次体检.")
 
 
-def _llm_components(use_llm: bool):
+def _llm_components(use_llm: bool, model: str = "gpt-4o-mini"):
     """Return the question generator and judge for one CLI run.
 
     Both components receive the same explicit key.  If the optional LLM
@@ -34,17 +34,22 @@ def _llm_components(use_llm: bool):
         return QuestionGenerator(), HeuristicJudge()
 
     try:
-        generator = QuestionGenerator(llm=make_litellm_callback(api_key=key))
-        judge = LiteLLMJudge(api_key=key)
+        generator = QuestionGenerator(llm=make_litellm_callback(model=model, api_key=key))
+        judge = LiteLLMJudge(model=model, api_key=key)
         return generator, judge
     except RuntimeError as e:
         typer.echo(f"LLM 不可用({e}),用离线启发式出题和裁判.")
         return QuestionGenerator(), HeuristicJudge()
 
 
-def _judge(use_llm: bool):
+def _judge(use_llm: bool, model: str = "gpt-4o-mini"):
     """Compatibility helper for callers that only need the judge."""
-    return _llm_components(use_llm)[1]
+    return _llm_components(use_llm, model=model)[1]
+
+
+def _validate_positive_option(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise typer.BadParameter(f"{name} must be a positive integer", param_hint=f"--{name}")
 
 
 @app.command()
@@ -53,10 +58,12 @@ def demo(
     out: str = typer.Option("report.html", "--out", "-o", help="报告输出路径"),
     lang: str = typer.Option("zh", "--lang", help="报告语言 zh|en"),
     use_llm: bool = typer.Option(False, "--llm", help="用 LLM 出题+裁判(需 key)"),
+    model: str = typer.Option("gpt-4o-mini", "--model", help="LLM 模型名(用于出题和裁判)"),
 ):
     """零 key 演示:内置 mock 知识库,10 分钟跑通全流程."""
+    _validate_positive_option("questions", questions)
     typer.echo("== rag-checkup demo 模式:内置 mock 知识库,无需任何 key ==")
-    generator, judge = _llm_components(use_llm)
+    generator, judge = _llm_components(use_llm, model=model)
     result = run_checkup(MockConnector(), n_per_doc=questions, judge=judge,
                          question_generator=generator,
                          progress=typer.echo)
@@ -76,8 +83,11 @@ def run(
     out: str = typer.Option("report.html", "--out", "-o"),
     lang: str = typer.Option("zh", "--lang", help="zh|en"),
     use_llm: bool = typer.Option(False, "--llm", help="用 LLM 出题+裁判(需 RAGCHECKUP_LLM_KEY)"),
+    model: str = typer.Option("gpt-4o-mini", "--model", help="LLM 模型名(用于出题和裁判)"),
 ):
     """连真实知识库做体检."""
+    _validate_positive_option("questions", questions)
+    _validate_positive_option("top-k", top_k)
     key = api_key or os.environ.get("RAGCHECKUP_DIFY_KEY" if platform == "dify"
                                     else "RAGCHECKUP_FASTGPT_KEY", "")
     if platform == "dify":
@@ -90,7 +100,7 @@ def run(
                                 base_url=base_url or "https://api.fastgpt.in/api")
     else:
         raise typer.BadParameter("platform 只能是 dify 或 fastgpt")
-    generator, judge = _llm_components(use_llm)
+    generator, judge = _llm_components(use_llm, model=model)
     result = run_checkup(conn, n_per_doc=questions, judge=judge,
                          question_generator=generator,
                          top_k=top_k, progress=typer.echo)
@@ -108,8 +118,12 @@ def ab_cmd(
     top_k_b: int = typer.Option(10, "--top-k-b"),
     questions: int = typer.Option(4, "--questions", "-n"),
     use_llm: bool = typer.Option(False, "--llm"),
+    model: str = typer.Option("gpt-4o-mini", "--model", help="LLM 模型名(用于出题和裁判)"),
 ):
     """A/B 对比:同一测试集跑两套 top-k,看改参数涨多少分."""
+    _validate_positive_option("questions", questions)
+    _validate_positive_option("top-k-a", top_k_a)
+    _validate_positive_option("top-k-b", top_k_b)
     key = api_key or os.environ.get("RAGCHECKUP_DIFY_KEY" if platform == "dify"
                                     else "RAGCHECKUP_FASTGPT_KEY", "")
 
@@ -123,7 +137,7 @@ def ab_cmd(
     def make_b():
         return make_a()
 
-    generator, judge = _llm_components(use_llm)
+    generator, judge = _llm_components(use_llm, model=model)
     cmp = ab_compare(make_a, make_b, label_a=f"top_k={top_k_a}", label_b=f"top_k={top_k_b}",
                      n_per_doc=questions, judge=judge, question_generator=generator,
                      top_k_a=top_k_a, top_k_b=top_k_b, progress=typer.echo)

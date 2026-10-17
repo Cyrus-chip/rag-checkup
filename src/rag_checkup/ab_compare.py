@@ -22,6 +22,12 @@ def ab_compare(
     progress: Callable[[str], None] | None = None,
     question_generator: QuestionGenerator | Callable[[list[Document], int], list[Question]] | None = None,
 ) -> dict:
+    if isinstance(n_per_doc, bool) or not isinstance(n_per_doc, int) or n_per_doc <= 0:
+        raise RuntimeError("n_per_doc must be a positive integer")
+    for name, value in (("top_k_a", top_k_a), ("top_k_b", top_k_b)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RuntimeError(f"{name} must be a positive integer")
+
     # Generate once on A, then pass the exact Question objects to B.  This
     # keeps the A/B delta about connector behavior rather than a new sample.
     ra: CheckupResult = run_checkup(

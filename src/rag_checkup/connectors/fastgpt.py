@@ -86,7 +86,7 @@ class FastGPTConnector(KBConnector):
         choice = (payload.get("choices") or [{}])[0]
         answer = (choice.get("message") or {}).get("content", "")
         chunks, citations = [], []
-        for i, q in enumerate(payload.get("responseData", []) or [], start=1):
+        for q in payload.get("responseData", []) or []:
             for item in q.get("quoteList", []) or []:
                 chunks.append(RetrievedChunk(
                     doc_id=str(item.get("id", "")),
@@ -94,6 +94,5 @@ class FastGPTConnector(KBConnector):
                     content=item.get("text", "") or item.get("q", ""),
                     score=float(item.get("score") or 0),
                 ))
-                citations.append(f"chunk-{i}")
-                i += 1
+                citations.append(f"chunk-{len(chunks)}")
         return answer, chunks, citations

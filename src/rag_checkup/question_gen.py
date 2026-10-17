@@ -102,6 +102,8 @@ class QuestionGenerator:
         self.llm = llm
 
     def generate(self, docs: list[Document], n_per_doc: int = 4) -> list[Question]:
+        if isinstance(n_per_doc, bool) or not isinstance(n_per_doc, int) or n_per_doc <= 0:
+            raise ValueError("n_per_doc must be a positive integer")
         questions: list[Question] = []
         for doc in docs:
             if self.llm:

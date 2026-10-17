@@ -10,6 +10,11 @@ from .scoring import Judge, Scorer
 from .suggestions import build_suggestions
 
 
+def _validate_positive_integer(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+
+
 def run_checkup(
     connector: KBConnector,
     n_per_doc: int = 4,
@@ -19,6 +24,11 @@ def run_checkup(
     question_generator: QuestionGenerator | Callable[[list[Document], int], list[Question]] | None = None,
     questions: list[Question] | None = None,
 ) -> CheckupResult:
+    _validate_positive_integer("n_per_doc", n_per_doc)
+    _validate_positive_integer("top_k", top_k)
+    if questions is not None and not questions:
+        raise RuntimeError("question set is empty; cannot run checkup")
+
     def log(msg: str):
         if progress:
             progress(msg)
@@ -34,6 +44,8 @@ def run_checkup(
             questions = generator.generate(docs, n_per_doc=n_per_doc)
         else:
             questions = generator(docs, n_per_doc)
+    if not questions:
+        raise RuntimeError("question set is empty; cannot run checkup")
     log(f"生成 {len(questions)} 道测试题,逐题提问打分…")
 
     scorer = Scorer(judge)
@@ -55,6 +67,8 @@ def run_checkup(
         "connector": connector.name,
         "n_docs": len(docs),
         "judge": type(scorer.judge).__name__,
+        "judge_fallbacks": scorer.judge_fallbacks,
+        "judge_errors": scorer.judge_errors,
         "top_k": top_k,
     }
     log(f"体检完成:总分 {aggregates['total']},bad case {aggregates['n_bad']}/{aggregates['n_cases']}")

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Protocol
 
@@ -28,6 +29,28 @@ def _f1(a: str, b: str) -> float:
     inter = len(ta & tb)
     p, r = inter / len(ta), inter / len(tb)
     return 0.0 if p + r == 0 else 2 * p * r / (p + r)
+
+
+def normalize_score(value: object) -> int:
+    """Validate and normalize a judge score to the public 0-100 scale.
+
+    LLM responses are untrusted input.  In particular, do not silently clamp
+    an out-of-range value: callers need to know that the judge response was
+    invalid and whether a fallback was used.
+    """
+    if isinstance(value, bool):
+        raise ValueError("judge score must be a number, not a boolean")
+    try:
+        score = float(value) if isinstance(value, str) else value
+        if not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+            raise ValueError("judge score must be a finite number")
+        if not 0 <= float(score) <= 100:
+            raise ValueError("judge score must be between 0 and 100")
+        return round(float(score))
+    except (TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("judge score must be"):
+            raise
+        raise ValueError("judge score must be a finite number") from exc
 
 
 class Judge(Protocol):
@@ -85,6 +108,20 @@ class LiteLLMJudge:
         self.model = model
         self.api_key = api_key
         self._fallback = HeuristicJudge()
+        self.fallback_count = 0
+        self.error_count = 0
+
+    def _fallback_result(self, rubric: str, answer: str, reference: str, error: str) -> dict:
+        self.fallback_count += 1
+        self.error_count += 1
+        fallback = self._fallback.judge(rubric, answer, reference)
+        score = normalize_score(fallback.get("score"))
+        return {
+            "score": score,
+            "reason": f"LLM judge error/fallback: {error}; {fallback['reason']}",
+            "_fallback": True,
+            "_error": True,
+        }
 
     def judge(self, rubric: str, answer: str, reference: str) -> dict:
         system = self.RUBRICS[rubric]
@@ -98,14 +135,25 @@ class LiteLLMJudge:
             kwargs["api_key"] = self.api_key
         try:
             resp = self._litellm.completion(**kwargs)
-        except Exception:
-            return self._fallback.judge(rubric, answer, reference)
-        text = resp.choices[0].message.content or "{}"
+        except Exception as exc:
+            return self._fallback_result(rubric, answer, reference, f"调用失败({type(exc).__name__})")
         try:
+            text = resp.choices[0].message.content or "{}"
+            if not isinstance(text, str):
+                raise ValueError("响应内容不是文本")
             data = json.loads(text[text.index("{"): text.rindex("}") + 1])
-            return {"score": int(data.get("score", 50)), "reason": str(data.get("reason", ""))}
-        except Exception:
-            return {"score": 50, "reason": f"judge 返回不可解析,原文:{text[:80]}"}
+            if not isinstance(data, dict) or "score" not in data:
+                raise ValueError("响应缺少 score 字段")
+            score = normalize_score(data["score"])
+            reason = data.get("reason", "")
+            if not isinstance(reason, str):
+                raise ValueError("响应 reason 字段不是文本")
+            return {"score": score, "reason": reason}
+        except Exception as exc:
+            return self._fallback_result(
+                rubric, answer, reference,
+                f"响应不可解析或分数无效({type(exc).__name__})",
+            )
 
 
 def citation_score(answer: str, chunks: list, citations: list[str]) -> tuple[int, str]:
@@ -127,6 +175,50 @@ def citation_score(answer: str, chunks: list, citations: list[str]) -> tuple[int
 class Scorer:
     def __init__(self, judge: Judge | None = None):
         self.judge = judge or HeuristicJudge()
+        self.judge_fallbacks = 0
+        self.judge_errors = 0
+        self._fallback = HeuristicJudge()
+
+    def _judge(self, rubric: str, answer: str, reference: str) -> tuple[int, str]:
+        """Call a judge and keep malformed custom judge results safe too."""
+        try:
+            result = self.judge.judge(rubric, answer, reference)
+        except Exception as exc:
+            self.judge_fallbacks += 1
+            self.judge_errors += 1
+            fallback = self._fallback.judge(rubric, answer, reference)
+            return normalize_score(fallback["score"]), (
+                f"judge error/fallback: 调用失败({type(exc).__name__}); {fallback['reason']}"
+            )
+
+        if not isinstance(result, dict):
+            error = "响应不是 JSON 对象"
+            result = {}
+        else:
+            error = ""
+        if result.get("_fallback"):
+            self.judge_fallbacks += 1
+        if result.get("_error"):
+            self.judge_errors += 1
+        try:
+            score = normalize_score(result["score"])
+        except (KeyError, TypeError, ValueError) as exc:
+            self.judge_fallbacks += 1
+            self.judge_errors += 1
+            fallback = self._fallback.judge(rubric, answer, reference)
+            detail = error or f"分数无效({exc})"
+            return normalize_score(fallback["score"]), (
+                f"judge error/fallback: {detail}; {fallback['reason']}"
+            )
+        reason = result.get("reason", "")
+        if not isinstance(reason, str):
+            self.judge_fallbacks += 1
+            self.judge_errors += 1
+            fallback = self._fallback.judge(rubric, answer, reference)
+            return normalize_score(fallback["score"]), (
+                f"judge error/fallback: reason 字段不是文本; {fallback['reason']}"
+            )
+        return score, reason
 
     def score(self, qa: QAResult) -> ScoredCase:
         q = qa.question
@@ -136,8 +228,9 @@ class Scorer:
         if q.qtype == "boundary":
             scores["correctness"], reasons["correctness"] = 100, "边界题不考正确性"
         else:
-            r = self.judge.judge("correctness", qa.answer, q.expected)
-            scores["correctness"], reasons["correctness"] = r["score"], r["reason"]
+            scores["correctness"], reasons["correctness"] = self._judge(
+                "correctness", qa.answer, q.expected
+            )
 
         # 2) 引用准确性(确定性)
         s, reason = citation_score(qa.answer, qa.chunks, qa.citations)
@@ -145,8 +238,7 @@ class Scorer:
 
         # 3) 拒答诚实度(仅边界题实质扣分)
         if q.qtype == "boundary":
-            r = self.judge.judge("refusal", qa.answer, "")
-            scores["refusal"], reasons["refusal"] = r["score"], r["reason"]
+            scores["refusal"], reasons["refusal"] = self._judge("refusal", qa.answer, "")
         else:
             scores["refusal"], reasons["refusal"] = 100, "非边界题不扣分"
 

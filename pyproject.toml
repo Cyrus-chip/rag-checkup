@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-checkup"
+version = "0.1.0"
+description = "10 分钟给线上知识库问答做一次体检:连上 Dify / FastGPT,自动出题、打分、出中文网页报告"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "rag-checkup contributors" }]
+keywords = ["rag", "evaluation", "dify", "fastgpt", "llm"]
+dependencies = [
+  "typer>=0.9",
+  "jinja2>=3.1",
+  "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+llm = ["litellm>=1.0"]
+test = ["pytest>=7"]
+
+[project.scripts]
+rag-checkup = "rag_checkup.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/chenyi6758-source/rag-checkup"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

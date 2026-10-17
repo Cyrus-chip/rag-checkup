@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 
 from .base import KBConnector
+from .http import request_with_retry
 from ..models import Document, RetrievedChunk
 
 
@@ -20,6 +21,8 @@ class FastGPTConnector(KBConnector):
         dataset_ids: list[str] | None = None,
         base_url: str = "https://api.fastgpt.in/api",
         timeout: float = 60.0,
+        max_retries: int = 2,
+        retry_backoff: float = 0.1,
     ):
         if not api_key:
             raise ValueError("FastGPT 需要 api_key(可用环境变量 RAGCHECKUP_FASTGPT_KEY 传入)")
@@ -27,6 +30,8 @@ class FastGPTConnector(KBConnector):
         self.dataset_ids = dataset_ids or []
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -38,7 +43,7 @@ class FastGPTConnector(KBConnector):
         with httpx.Client(timeout=self.timeout) as client:
             for ds_id in self.dataset_ids[:5]:
                 try:
-                    r = client.get(
+                    r = self._request(client, "GET",
                         f"{self.base_url}/core/dataset/collection/list",
                         headers=self._headers(),
                         params={"parentId": ds_id, "pageNum": 1, "pageSize": 50},
@@ -58,7 +63,7 @@ class FastGPTConnector(KBConnector):
 
     def _collection_text(self, client: httpx.Client, dataset_id: str, collection_id: str) -> str:
         try:
-            r = client.post(
+            r = self._request(client, "POST",
                 f"{self.base_url}/core/dataset/data/list",
                 headers=self._headers(),
                 json={"collectionId": collection_id, "pageNum": 1, "pageSize": 50, "searchText": ""},
@@ -66,8 +71,10 @@ class FastGPTConnector(KBConnector):
             r.raise_for_status()
             items = r.json().get("data", {}).get("list", [])
             return "\n".join(f"{it.get('q', '')}\n{it.get('a', '')}".strip() for it in items)
-        except httpx.HTTPError:
-            return ""
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"FastGPT 读取 collection 内容失败(collection={collection_id}):{type(exc).__name__}"
+            ) from exc
 
     def query(self, question: str, top_k: int = 5) -> tuple[str, list[RetrievedChunk], list[str]]:
         body: dict = {
@@ -79,7 +86,8 @@ class FastGPTConnector(KBConnector):
         if self.dataset_ids:
             body["datasetIds"] = self.dataset_ids
         with httpx.Client(timeout=self.timeout) as client:
-            r = client.post(f"{self.base_url}/v1/chat/completions", headers=self._headers(), json=body)
+            r = self._request(client, "POST", f"{self.base_url}/v1/chat/completions",
+                              headers=self._headers(), json=body)
             r.raise_for_status()
             payload = r.json()
 
@@ -96,3 +104,9 @@ class FastGPTConnector(KBConnector):
                 ))
                 citations.append(f"chunk-{len(chunks)}")
         return answer, chunks, citations
+
+    def _request(self, client: httpx.Client, method: str, url: str, **kwargs) -> httpx.Response:
+        return request_with_retry(
+            client, method, url, max_retries=self.max_retries,
+            retry_backoff=self.retry_backoff, **kwargs,
+        )

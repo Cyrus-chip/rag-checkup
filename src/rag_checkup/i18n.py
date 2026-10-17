@@ -12,7 +12,8 @@ STRINGS = {
         "citations": "声明引用", "reason": "扣分原因", "copy": "复制",
         "meta": "体检信息", "connector": "知识库", "n_cases": "测试题数",
         "bad_rate": "Bad Case 占比", "judge": "裁判", "judge_fallbacks": "裁判回退次数",
-        "judge_errors": "裁判错误次数", "all_ok": "全部通过",
+        "judge_errors": "裁判错误次数", "connector_errors": "连接器错误次数",
+        "connector_error": "连接器错误", "status": "状态", "all_ok": "全部通过",
         "expand": "展开", "type_names": {"factual": "事实问答", "boundary": "边界拒答", "paraphrase": "改写鲁棒"},
     },
     "en": {
@@ -25,7 +26,8 @@ STRINGS = {
         "citations": "Citations", "reason": "Why Deducted", "copy": "Copy",
         "meta": "Checkup Info", "connector": "Knowledge Base", "n_cases": "# Questions",
         "bad_rate": "Bad Case Rate", "judge": "Judge", "judge_fallbacks": "Judge fallbacks",
-        "judge_errors": "Judge errors", "all_ok": "All Passed",
+        "judge_errors": "Judge errors", "connector_errors": "Connector errors",
+        "connector_error": "Connector error", "status": "Status", "all_ok": "All Passed",
         "expand": "Expand", "type_names": {"factual": "Factual", "boundary": "Boundary", "paraphrase": "Paraphrase"},
     },
 }

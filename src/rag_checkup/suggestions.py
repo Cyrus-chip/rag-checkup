@@ -11,11 +11,19 @@ def build_suggestions(cases: list[ScoredCase]) -> list[dict]:
     n = len(cases)
     out: list[dict] = []
 
+    connector_errors = [c for c in bad if c.status == "connector_error"]
+    if connector_errors:
+        out.append({
+            "title": "连接器请求失败", "level": "bad",
+            "detail": f"{len(connector_errors)} 道题未能完成知识库请求,已按连接器错误计分。"
+                      "建议:检查服务可用性、网络与权限;报告中的错误类型不包含 API key。",
+        })
+
     def ratio(pred) -> float:
         return sum(1 for c in bad if pred(c)) / n
 
     # 规则1:检索没召回
-    no_recall = [c for c in bad if not c.qa.chunks]
+    no_recall = [c for c in bad if c.status != "connector_error" and not c.qa.chunks]
     if no_recall:
         out.append({"title": "检索召回不足", "level": "warn",
                     "detail": f"{len(no_recall)} 道题完全没有召回 chunk。"

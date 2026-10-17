@@ -38,6 +38,8 @@ class QAResult:
     answer: str
     chunks: list[RetrievedChunk] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)  # 答案中声明引用的 chunk 标识
+    status: str = "ok"
+    error: str = ""
 
 
 @dataclass
@@ -46,6 +48,8 @@ class ScoredCase:
     scores: dict = field(default_factory=dict)  # correctness / citation / refusal -> 0-100
     reasons: dict = field(default_factory=dict)
     is_bad: bool = False  # 任一维度 < 60 即为 bad case
+    status: str = "ok"
+    error: str = ""
 
 
 @dataclass

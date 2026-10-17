@@ -224,6 +224,20 @@ class Scorer:
         q = qa.question
         scores, reasons = {}, {}
 
+        if qa.status != "ok" or qa.error:
+            error = qa.error or "connector query failed"
+            reason = f"connector error: {error}"
+            scores = {"correctness": 0, "citation": 0, "refusal": 0}
+            reasons = {dimension: reason for dimension in scores}
+            return ScoredCase(
+                qa=qa,
+                scores=scores,
+                reasons=reasons,
+                is_bad=True,
+                status="connector_error",
+                error=error,
+            )
+
         # 1) 正确性(边界题不适用)
         if q.qtype == "boundary":
             scores["correctness"], reasons["correctness"] = 100, "边界题不考正确性"
@@ -243,4 +257,5 @@ class Scorer:
             scores["refusal"], reasons["refusal"] = 100, "非边界题不扣分"
 
         is_bad = any(v < 60 for v in scores.values())
-        return ScoredCase(qa=qa, scores=scores, reasons=reasons, is_bad=is_bad)
+        return ScoredCase(qa=qa, scores=scores, reasons=reasons, is_bad=is_bad,
+                          status=qa.status, error=qa.error)

@@ -35,7 +35,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid 
 </style></head><body>
 <div class="card">
 <h1>{{ S.title }}</h1>
-<div class="sub">{{ now }} · {{ S.connector }}: {{ meta.connector }} · {{ S.n_cases }}: {{ agg.n_cases }} · {{ S.judge }}: {{ meta.judge }} · {{ S.judge_fallbacks }}: {{ meta.get('judge_fallbacks', 0) }} · {{ S.judge_errors }}: {{ meta.get('judge_errors', 0) }}</div>
+<div class="sub">{{ now }} · {{ S.connector }}: {{ meta.connector }} · {{ S.n_cases }}: {{ agg.n_cases }} · {{ S.judge }}: {{ meta.judge }} · {{ S.judge_fallbacks }}: {{ meta.get('judge_fallbacks', 0) }} · {{ S.judge_errors }}: {{ meta.get('judge_errors', 0) }} · {{ S.connector_errors }}: {{ meta.get('connector_errors', 0) }}</div>
 <div style="display:flex;gap:20px;align-items:center;margin-top:12px;flex-wrap:wrap">
 <div><div class="total">{{ agg.total }}</div><div class="sub">{{ S.total }}</div></div>
 <div>{{ radar|safe }}</div>
@@ -57,6 +57,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid 
 {% for c in bad_cases %}<details class="{{ 'bad' }}">
 <summary>[{{ c.qa.question.qtype }}] {{ c.qa.question.text|e }} — 最低分 {{ c.min_score }}</summary>
 <p><b>{{ S.question }}:</b> {{ c.qa.question.text|e }}</p>
+<p><b>{{ S.status }}:</b> {{ c.status|e }}</p>
+{% if c.status == 'connector_error' %}<p style="color:#ef4444"><b>{{ S.connector_error }}:</b> {{ c.error|e }}</p>{% endif %}
 <p><b>{{ S.answer }}:</b></p><pre>{{ c.qa.answer|e }}</pre>
 <p><b>{{ S.chunks }} ({{ c.qa.chunks|length }}):</b></p>
 {% for ch in c.qa.chunks %}<pre>{{ ch.content|e }}</pre>{% endfor %}
@@ -71,7 +73,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border:1px solid 
 
 <div class="card"><h2>{{ S.meta }}</h2>
 <table>{% for k,v in meta.items() %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}</table></div>
-<div class="footer">rag-checkup v{{ version }} · 本地运行,Key 与数据不出内网</div>
+<div class="footer">rag-checkup v{{ version }} · 报告在本地生成；启用 LLM 时数据会发送到所选模型提供商</div>
 </body></html>
 """
 

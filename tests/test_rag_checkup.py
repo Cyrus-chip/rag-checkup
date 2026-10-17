@@ -4,10 +4,12 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from rag_checkup.connectors.mock import MockConnector, DOCS
+from rag_checkup.connectors.dify import DifyConnector
 from rag_checkup.connectors.fastgpt import FastGPTConnector
 from rag_checkup import cli
 from rag_checkup.models import QAResult, Question, RetrievedChunk
@@ -364,3 +366,208 @@ def test_no_real_keys_required():
         os.environ.pop(var, None)
     result = run_checkup(MockConnector(), n_per_doc=2)
     assert result.aggregates["n_cases"] > 0
+
+
+def test_connector_query_failure_is_one_bad_case_and_does_not_abort_report():
+    class PartiallyFailingConnector(MockConnector):
+        name = "partial"
+
+        def query(self, question, top_k=5):
+            if question == "会失败的问题":
+                raise RuntimeError("Authorization: Bearer api-key-must-not-appear")
+            return super().query(question, top_k=top_k)
+
+    questions = [
+        Question("会失败的问题", "factual", expected="答案"),
+        Question("整机保修为多少？", "factual", expected="1 年"),
+    ]
+    result = run_checkup(PartiallyFailingConnector(), questions=questions)
+
+    assert len(result.cases) == 2
+    failed, passed = result.cases
+    assert failed.status == failed.qa.status == "connector_error"
+    assert failed.error == failed.qa.error
+    assert "会失败的问题" in failed.error
+    assert "RuntimeError" in failed.error
+    assert "api-key-must-not-appear" not in failed.error
+    assert passed.status == "ok"
+    assert result.meta["connector_errors"] == 1
+    assert any(s["title"] == "连接器请求失败" for s in result.suggestions)
+    report_zh = render(result, lang="zh")
+    report_en = render(result, lang="en")
+    assert "连接器错误次数" in report_zh
+    assert "Connector errors" in report_en
+    assert "会失败的问题" in report_zh and "RuntimeError" in report_zh
+    assert "api-key-must-not-appear" not in report_zh
+
+
+class _ContractClient:
+    def __init__(self, routes, calls):
+        self.routes = routes
+        self.calls = calls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def _response(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        result = self.routes(method, url, kwargs)
+        if isinstance(result, list):
+            result = result.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        status, payload = result
+        return httpx.Response(
+            status,
+            json=payload,
+            request=httpx.Request(method, url),
+        )
+
+    def get(self, url, **kwargs):
+        return self._response("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self._response("POST", url, **kwargs)
+
+
+def test_dify_dataset_http_contract_maps_documents_segments_and_retrieve(monkeypatch):
+    calls = []
+
+    def routes(method, url, kwargs):
+        if url.endswith("/documents"):
+            assert method == "GET"
+            assert kwargs["params"] == {"page": 1, "limit": 20}
+            return 200, {"data": [{"id": "doc-1", "name": "产品文档"}], "has_more": False}
+        if url.endswith("/documents/doc-1/segments"):
+            return 200, {"data": [{"content": "答案段落"}]}
+        if url.endswith("/retrieve"):
+            assert kwargs["json"]["query"] == "产品问题"
+            assert kwargs["json"]["retrieval_model"]["top_k"] == 3
+            return 200, {"records": [{
+                "score": 0.91,
+                "segment": {"document_id": "doc-1", "content": "召回段落",
+                             "document": {"name": "产品文档"}},
+            }]}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        "rag_checkup.connectors.dify.httpx.Client",
+        lambda **kwargs: _ContractClient(routes, calls),
+    )
+    connector = DifyConnector(api_key="dify-key", dataset_id="ds-1", base_url="http://dify")
+
+    docs = connector.list_documents()
+    answer, chunks, citations = connector.query("产品问题", top_k=3)
+
+    assert docs[0].id == "doc-1" and docs[0].content == "答案段落"
+    assert answer == "召回段落"
+    assert chunks[0].doc_id == "doc-1" and chunks[0].score == 0.91
+    assert citations == ["chunk-1"]
+    assert [method for method, _, _ in calls] == ["GET", "GET", "POST"]
+
+
+def test_dify_app_uses_app_retriever_resources_as_citation_chunks(monkeypatch):
+    calls = []
+
+    def routes(method, url, kwargs):
+        assert method == "POST" and url.endswith("/chat-messages")
+        return 200, {
+            "answer": "应用答案【1】",
+            "retriever_resources": [{
+                "document_id": "app-doc",
+                "document_name": "应用证据",
+                "segment_id": "seg-1",
+                "content": "应用返回的证据",
+                "score": 0.88,
+            }],
+        }
+
+    monkeypatch.setattr(
+        "rag_checkup.connectors.dify.httpx.Client",
+        lambda **kwargs: _ContractClient(routes, calls),
+    )
+    connector = DifyConnector(
+        api_key="dataset-key", dataset_id="ds-1", app_key="app-key", base_url="http://dify",
+    )
+
+    answer, chunks, citations = connector.query("问题", top_k=5)
+
+    assert answer == "应用答案【1】"
+    assert chunks == [RetrievedChunk("app-doc", "应用证据", "应用返回的证据", 0.88)]
+    assert citations == ["chunk-1"]
+    assert len(calls) == 1
+    assert calls[0][1].endswith("/chat-messages")
+    assert citation_score(answer, chunks, citations)[0] == 100
+
+
+def test_dify_auth_failure_is_not_retried(monkeypatch):
+    calls = []
+
+    def routes(method, url, kwargs):
+        return 401, {"message": "invalid key"}
+
+    monkeypatch.setattr(
+        "rag_checkup.connectors.dify.httpx.Client",
+        lambda **kwargs: _ContractClient(routes, calls),
+    )
+    connector = DifyConnector(
+        api_key="secret-key", dataset_id="ds-1", base_url="http://dify", retry_backoff=0,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        connector.query("问题")
+    assert len(calls) == 1
+
+
+def test_fastgpt_contract_failure_is_explicit_and_transient_5xx_retries(monkeypatch):
+    calls = []
+    responses = [
+        (503, {"message": "temporarily unavailable"}),
+        (200, {
+            "choices": [{"message": {"content": "FastGPT 答案"}}],
+            "responseData": [{"quoteList": [{
+                "id": "quote-1", "sourceName": "来源", "text": "FastGPT 证据", "score": 0.7,
+            }]}],
+        }),
+    ]
+
+    def routes(method, url, kwargs):
+        assert method == "POST" and url.endswith("/v1/chat/completions")
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "rag_checkup.connectors.fastgpt.httpx.Client",
+        lambda **kwargs: _ContractClient(routes, calls),
+    )
+    connector = FastGPTConnector(
+        api_key="fastgpt-key", base_url="http://fastgpt", retry_backoff=0,
+    )
+
+    answer, chunks, citations = connector.query("问题")
+
+    assert answer == "FastGPT 答案"
+    assert chunks[0].content == "FastGPT 证据"
+    assert citations == ["chunk-1"]
+    assert len(calls) == 2
+
+
+def test_fastgpt_auth_failure_is_not_retried(monkeypatch):
+    calls = []
+
+    def routes(method, url, kwargs):
+        return 403, {"message": "forbidden"}
+
+    monkeypatch.setattr(
+        "rag_checkup.connectors.fastgpt.httpx.Client",
+        lambda **kwargs: _ContractClient(routes, calls),
+    )
+    connector = FastGPTConnector(
+        api_key="secret-key", base_url="http://fastgpt", retry_backoff=0,
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        connector.query("问题")
+    assert len(calls) == 1

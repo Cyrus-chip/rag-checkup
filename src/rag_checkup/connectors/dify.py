@@ -11,6 +11,7 @@ from __future__ import annotations
 import httpx
 
 from .base import KBConnector
+from .http import request_with_retry
 from ..models import Document, RetrievedChunk
 
 
@@ -24,6 +25,8 @@ class DifyConnector(KBConnector):
         base_url: str = "https://api.dify.ai/v1",
         app_key: str | None = None,
         timeout: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff: float = 0.1,
     ):
         if not api_key or not dataset_id:
             raise ValueError("Dify 需要 api_key 和 dataset_id(可用环境变量 RAGCHECKUP_DIFY_KEY 传入 key)")
@@ -32,6 +35,8 @@ class DifyConnector(KBConnector):
         self.base_url = base_url.rstrip("/")
         self.app_key = app_key
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
 
     def _headers(self, key: str) -> dict:
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -41,7 +46,7 @@ class DifyConnector(KBConnector):
         page, page_size = 1, min(limit, 100)
         with httpx.Client(timeout=self.timeout) as client:
             while len(docs) < limit:
-                r = client.get(
+                r = self._request(client, "GET",
                     f"{self.base_url}/datasets/{self.dataset_id}/documents",
                     headers=self._headers(self.api_key),
                     params={"page": page, "limit": page_size},
@@ -63,7 +68,7 @@ class DifyConnector(KBConnector):
         return docs
 
     def _segments(self, client: httpx.Client, document_id: str) -> list[dict]:
-        r = client.get(
+        r = self._request(client, "GET",
             f"{self.base_url}/datasets/{self.dataset_id}/documents/{document_id}/segments",
             headers=self._headers(self.api_key),
         )
@@ -71,8 +76,11 @@ class DifyConnector(KBConnector):
         return r.json().get("data", [])
 
     def query(self, question: str, top_k: int = 5) -> tuple[str, list[RetrievedChunk], list[str]]:
+        if self.app_key:
+            return self._chat(question=question, top_k=top_k)
+
         with httpx.Client(timeout=self.timeout) as client:
-            r = client.post(
+            r = self._request(client, "POST",
                 f"{self.base_url}/datasets/{self.dataset_id}/retrieve",
                 headers=self._headers(self.api_key),
                 json={
@@ -98,17 +106,20 @@ class DifyConnector(KBConnector):
             for rec in records
         ]
 
-        if self.app_key:
-            answer, citations = self._chat(client=None, question=question, chunks=chunks)
-        else:
-            # dataset 模式:抽取式答案,引用即 top-1
-            answer = chunks[0].content if chunks else "未检索到相关内容。"
-            citations = ["chunk-1"] if chunks else []
+        # dataset 模式:抽取式答案,引用即 top-1
+        answer = chunks[0].content if chunks else "未检索到相关内容。"
+        citations = ["chunk-1"] if chunks else []
         return answer, chunks, citations
 
-    def _chat(self, client, question: str, chunks: list[RetrievedChunk]) -> tuple[str, list[str]]:
+    def _request(self, client: httpx.Client, method: str, url: str, **kwargs) -> httpx.Response:
+        return request_with_retry(
+            client, method, url, max_retries=self.max_retries,
+            retry_backoff=self.retry_backoff, **kwargs,
+        )
+
+    def _chat(self, question: str, top_k: int = 5) -> tuple[str, list[RetrievedChunk], list[str]]:
         with httpx.Client(timeout=self.timeout) as client:
-            r = client.post(
+            r = self._request(client, "POST",
                 f"{self.base_url}/chat-messages",
                 headers=self._headers(self.app_key or ""),
                 json={"inputs": {}, "query": question, "response_mode": "blocking", "user": "rag-checkup"},
@@ -116,8 +127,25 @@ class DifyConnector(KBConnector):
             r.raise_for_status()
             payload = r.json()
         answer = payload.get("answer", "")
-        citations: list[str] = []
-        for i, res in enumerate(payload.get("retriever_resources", []) or [], start=1):
-            if res.get("content"):
-                citations.append(f"chunk-{i}")
-        return answer, citations
+        chunks: list[RetrievedChunk] = []
+        for res in payload.get("retriever_resources", []) or []:
+            if not isinstance(res, dict):
+                continue
+            content = res.get("content") or res.get("text") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            try:
+                score = float(res.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0.0
+            chunks.append(RetrievedChunk(
+                doc_id=str(res.get("document_id") or res.get("segment_id") or ""),
+                title=str(res.get("document_name") or res.get("dataset_name") or ""),
+                content=content,
+                score=score,
+            ))
+        # The app's resources are the evidence for this answer.  Do not use a
+        # second dataset retrieve response: its ordering can differ from the
+        # app's citations and make an otherwise valid citation look wrong.
+        return answer, chunks, [f"chunk-{i}" for i, chunk in enumerate(chunks, 1)
+                                if chunk.content]

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 from .connectors.base import KBConnector
-from .models import CheckupResult, QAResult
+from .models import CheckupResult, Document, QAResult, Question
 from .question_gen import QuestionGenerator
 from .scoring import Judge, Scorer
 from .suggestions import build_suggestions
@@ -16,6 +16,8 @@ def run_checkup(
     judge: Judge | None = None,
     top_k: int = 5,
     progress: Callable[[str], None] | None = None,
+    question_generator: QuestionGenerator | Callable[[list[Document], int], list[Question]] | None = None,
+    questions: list[Question] | None = None,
 ) -> CheckupResult:
     def log(msg: str):
         if progress:
@@ -26,7 +28,12 @@ def run_checkup(
     if not docs:
         raise RuntimeError("知识库文档为空,无法出题")
     log(f"拉到 {len(docs)} 篇文档,正在出题…")
-    questions = QuestionGenerator().generate(docs, n_per_doc=n_per_doc)
+    if questions is None:
+        generator = question_generator or QuestionGenerator()
+        if hasattr(generator, "generate"):
+            questions = generator.generate(docs, n_per_doc=n_per_doc)
+        else:
+            questions = generator(docs, n_per_doc)
     log(f"生成 {len(questions)} 道测试题,逐题提问打分…")
 
     scorer = Scorer(judge)

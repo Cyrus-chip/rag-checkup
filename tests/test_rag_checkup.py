@@ -1,6 +1,7 @@
 """rag-checkup 测试:全部离线,不调任何真实 API/Key."""
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,9 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rag_checkup.connectors.mock import MockConnector, DOCS
 from rag_checkup.models import QAResult, Question, RetrievedChunk
 from rag_checkup.pipeline import run_checkup
-from rag_checkup.question_gen import QuestionGenerator
+from rag_checkup.question_gen import QuestionGenerator, make_litellm_callback
 from rag_checkup.report import render, write_report
-from rag_checkup.scoring import Scorer, citation_score
+from rag_checkup.scoring import LiteLLMJudge, Scorer, citation_score
 from rag_checkup.suggestions import build_suggestions
 from rag_checkup.ab_compare import ab_compare
 
@@ -34,6 +35,62 @@ def test_question_gen_csv(tmp_path):
     with open(p, encoding="utf-8-sig") as f:
         head = f.readline()
     assert "text" in head and "qtype" in head
+
+
+def test_question_gen_fake_llm_callback_is_offline():
+    prompts = []
+
+    def fake_llm(prompt):
+        prompts.append(prompt)
+        return '[{"text":"电池续航是多少？","qtype":"factual","expected":"18 小时"}]'
+
+    questions = QuestionGenerator(llm=fake_llm).generate(DOCS[:1], n_per_doc=2)
+
+    assert len(prompts) == 1
+    assert questions[0].text == "电池续航是多少？"
+    assert questions[0].expected == "18 小时"
+
+
+def test_litellm_components_receive_explicit_key_without_network():
+    class FakeLiteLLM:
+        def __init__(self, content):
+            self.content = content
+            self.calls = []
+
+        def completion(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+            )
+
+    generator_llm = FakeLiteLLM(
+        '[{"text":"测试题？","qtype":"factual","expected":"答案"}]'
+    )
+    callback = make_litellm_callback(
+        model="fake-model", api_key="test-key", litellm_module=generator_llm
+    )
+    assert callback("出一道题")
+    assert generator_llm.calls[0]["api_key"] == "test-key"
+
+    judge_llm = FakeLiteLLM('{"score": 77, "reason": "mock"}')
+    judged = LiteLLMJudge(
+        model="fake-model", api_key="test-key", litellm_module=judge_llm
+    ).judge("correctness", "答案", "参考")
+    assert judged == {"score": 77, "reason": "mock"}
+    assert judge_llm.calls[0]["api_key"] == "test-key"
+
+
+def test_litellm_judge_runtime_failure_uses_heuristic_fallback():
+    class FailingLiteLLM:
+        def completion(self, **kwargs):
+            raise RuntimeError("offline")
+
+    judged = LiteLLMJudge(litellm_module=FailingLiteLLM()).judge(
+        "correctness", "答案包含 18 小时", "18 小时"
+    )
+
+    assert judged["score"] == 100
+    assert "参考答案" in judged["reason"]
 
 
 def test_mock_behaviors():
@@ -117,9 +174,41 @@ def test_report_renders(tmp_path):
 def test_ab_compare():
     cmp = ab_compare(MockConnector, MockConnector, label_a="k=3", label_b="k=10",
                      n_per_doc=2, top_k_a=1, top_k_b=5)
-    assert "rows" in cmp and cmp["winner"] in ("k=3", "k=10")
+    assert "rows" in cmp and cmp["winner"] in ("k=3", "k=10", "tie")
     dims = {r["dim"] for r in cmp["rows"]}
     assert {"correctness", "citation", "refusal", "total"} <= dims
+
+
+def test_ab_compare_reuses_one_generated_question_set():
+    asked_a, asked_b = [], []
+
+    class RecordingConnector(MockConnector):
+        def __init__(self, asked):
+            super().__init__()
+            self.asked = asked
+
+        def query(self, question, top_k=5):
+            self.asked.append(question)
+            return super().query(question, top_k=top_k)
+
+    class CountingGenerator:
+        calls = 0
+
+        def generate(self, docs, n_per_doc=4):
+            self.calls += 1
+            return [Question("整机保修为多少？", "factual", expected="1 年")]
+
+    generator = CountingGenerator()
+    cmp = ab_compare(
+        lambda: RecordingConnector(asked_a),
+        lambda: RecordingConnector(asked_b),
+        n_per_doc=1,
+        question_generator=generator,
+    )
+
+    assert generator.calls == 1
+    assert asked_a == asked_b == ["整机保修为多少？"]
+    assert cmp["result_a"].cases[0].qa.question is cmp["result_b"].cases[0].qa.question
 
 
 def test_no_real_keys_required():

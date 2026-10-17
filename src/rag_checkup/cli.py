@@ -11,20 +11,40 @@ from .connectors.dify import DifyConnector
 from .connectors.fastgpt import FastGPTConnector
 from .connectors.mock import MockConnector
 from .pipeline import run_checkup
+from .question_gen import QuestionGenerator, make_litellm_callback
 from .report import write_report
 from .scoring import HeuristicJudge, LiteLLMJudge
 
 app = typer.Typer(help="10 分钟给知识库问答做一次体检.")
 
 
+def _llm_components(use_llm: bool):
+    """Return the question generator and judge for one CLI run.
+
+    Both components receive the same explicit key.  If the optional LLM
+    dependency is unavailable, or no key is configured, the complete run stays
+    usable through the deterministic generator/judge.
+    """
+    if not use_llm:
+        return QuestionGenerator(), HeuristicJudge()
+
+    key = os.environ.get("RAGCHECKUP_LLM_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        typer.echo("未找到 LLM key,用离线启发式出题和裁判(可用 RAGCHECKUP_LLM_KEY 启用 LLM).")
+        return QuestionGenerator(), HeuristicJudge()
+
+    try:
+        generator = QuestionGenerator(llm=make_litellm_callback(api_key=key))
+        judge = LiteLLMJudge(api_key=key)
+        return generator, judge
+    except RuntimeError as e:
+        typer.echo(f"LLM 不可用({e}),用离线启发式出题和裁判.")
+        return QuestionGenerator(), HeuristicJudge()
+
+
 def _judge(use_llm: bool):
-    if use_llm:
-        key = os.environ.get("RAGCHECKUP_LLM_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not key:
-            typer.echo("未找到 LLM key,用离线启发式裁判(可用 RAGCHECKUP_LLM_KEY 启用 LLM 裁判).")
-            return HeuristicJudge()
-        return LiteLLMJudge()
-    return HeuristicJudge()
+    """Compatibility helper for callers that only need the judge."""
+    return _llm_components(use_llm)[1]
 
 
 @app.command()
@@ -36,7 +56,9 @@ def demo(
 ):
     """零 key 演示:内置 mock 知识库,10 分钟跑通全流程."""
     typer.echo("== rag-checkup demo 模式:内置 mock 知识库,无需任何 key ==")
-    result = run_checkup(MockConnector(), n_per_doc=questions, judge=_judge(use_llm),
+    generator, judge = _llm_components(use_llm)
+    result = run_checkup(MockConnector(), n_per_doc=questions, judge=judge,
+                         question_generator=generator,
                          progress=typer.echo)
     path = write_report(result, out, lang=lang, version=__version__)
     typer.echo(f"报告已生成:{path}  总分:{result.aggregates['total']}")
@@ -68,7 +90,9 @@ def run(
                                 base_url=base_url or "https://api.fastgpt.in/api")
     else:
         raise typer.BadParameter("platform 只能是 dify 或 fastgpt")
-    result = run_checkup(conn, n_per_doc=questions, judge=_judge(use_llm),
+    generator, judge = _llm_components(use_llm)
+    result = run_checkup(conn, n_per_doc=questions, judge=judge,
+                         question_generator=generator,
                          top_k=top_k, progress=typer.echo)
     path = write_report(result, out, lang=lang, version=__version__)
     typer.echo(f"报告已生成:{path}  总分:{result.aggregates['total']}")
@@ -99,8 +123,9 @@ def ab_cmd(
     def make_b():
         return make_a()
 
+    generator, judge = _llm_components(use_llm)
     cmp = ab_compare(make_a, make_b, label_a=f"top_k={top_k_a}", label_b=f"top_k={top_k_b}",
-                     n_per_doc=questions, judge=_judge(use_llm),
+                     n_per_doc=questions, judge=judge, question_generator=generator,
                      top_k_a=top_k_a, top_k_b=top_k_b, progress=typer.echo)
     typer.echo(f"\nA/B 对比结果:胜者 {cmp['winner']},总分差 {cmp['delta_total']:+}")
     for r in cmp["rows"]:

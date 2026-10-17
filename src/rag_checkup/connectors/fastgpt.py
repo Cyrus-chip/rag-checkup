@@ -33,7 +33,7 @@ class FastGPTConnector(KBConnector):
 
     def list_documents(self, limit: int = 20) -> list[Document]:
         # FastGPT 的 dataset 数据接口按 collection 组织;这里做尽力拉取,
-        # 拉不到就抛错并提示用户用 --questions-file 自备测试题.
+        # 拉不到就抛出明确的 dataset/key 权限错误.
         docs: list[Document] = []
         with httpx.Client(timeout=self.timeout) as client:
             for ds_id in self.dataset_ids[:5]:
@@ -51,10 +51,9 @@ class FastGPTConnector(KBConnector):
                         if len(docs) >= limit:
                             return docs
                 except httpx.HTTPError as e:
-                    raise RuntimeError(f"FastGPT 拉取文档失败(dataset={ds_id}):{e}\n"
-                                       "可改用 --questions-file 自备测试题跳过自动出题.") from e
+                    raise RuntimeError(f"FastGPT 拉取文档失败(dataset={ds_id}):{e}") from e
         if not docs:
-            raise RuntimeError("FastGPT 未拉到任何文档内容,请检查 datasetId / key 权限,或用 --questions-file 自备测试题.")
+            raise RuntimeError("FastGPT 未拉到任何文档内容,请检查 datasetId / key 权限.")
         return docs
 
     def _collection_text(self, client: httpx.Client, dataset_id: str, collection_id: str) -> str:

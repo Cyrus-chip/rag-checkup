@@ -1,6 +1,7 @@
 """三维打分:正确性 / 引用准确性 / 拒答诚实度.
 
-- 引用准确性:纯确定性文本匹配,零幻觉.
+- 引用准确性:纯确定性文本匹配,只验证引用能定位到召回内容;
+  不判断该内容是否在语义上支持答案.
 - 正确性/拒答诚实度:默认 HeuristicJudge(离线可跑);有 key 时用 LiteLLMJudge,
   rubric 结构化,返回 {score, reason} JSON.
 """
@@ -57,7 +58,7 @@ class HeuristicJudge:
 
 
 class LiteLLMJudge:
-    """有 key 时用:litellm 统一多模型,rubric 结构化."""
+    """有 key 时用 LiteLLM 统一多模型;调用失败回退离线裁判."""
 
     RUBRICS = {
         "correctness": (
@@ -72,21 +73,33 @@ class LiteLLMJudge:
         ),
     }
 
-    def __init__(self, model: str = "gpt-4o-mini"):
-        try:
-            import litellm  # type: ignore
-        except ImportError as e:
-            raise RuntimeError("未安装 litellm,请 pip install litellm 或改用离线模式") from e
-        self._litellm = litellm
+    def __init__(self, model: str = "gpt-4o-mini", api_key: str | None = None,
+                 litellm_module=None):
+        if litellm_module is None:
+            try:
+                import litellm  # type: ignore
+            except ImportError as e:
+                raise RuntimeError("未安装 litellm,请 pip install 'rag-checkup[llm]' 或改用离线模式") from e
+            litellm_module = litellm
+        self._litellm = litellm_module
         self.model = model
+        self.api_key = api_key
+        self._fallback = HeuristicJudge()
 
     def judge(self, rubric: str, answer: str, reference: str) -> dict:
         system = self.RUBRICS[rubric]
         user = f"【模型答案】{answer}\n【参考答案】{reference}"
-        resp = self._litellm.completion(
-            model=self.model, temperature=0,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
+        kwargs = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        try:
+            resp = self._litellm.completion(**kwargs)
+        except Exception:
+            return self._fallback.judge(rubric, answer, reference)
         text = resp.choices[0].message.content or "{}"
         try:
             data = json.loads(text[text.index("{"): text.rindex("}") + 1])

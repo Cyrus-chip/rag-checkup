@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable
+from typing import Any, Callable
 
 from .models import Document, Question
 
@@ -23,6 +23,39 @@ PARAPHRASE_MAP = [
     ("是什么？", "指的是什么？"),
     ("有哪些？", "包括哪些？"),
 ]
+
+
+def make_litellm_callback(
+    model: str = "gpt-4o-mini",
+    api_key: str | None = None,
+    litellm_module: Any | None = None,
+) -> Callable[[str], str]:
+    """Build the prompt -> text callback used for LLM question generation.
+
+    ``api_key`` is passed explicitly to LiteLLM instead of relying on a
+    provider-specific environment variable.  ``litellm_module`` is an
+    optional injection point for offline tests; normal callers leave it unset.
+    """
+    if litellm_module is None:
+        try:
+            import litellm  # type: ignore
+        except ImportError as e:
+            raise RuntimeError("未安装 litellm,请 pip install 'rag-checkup[llm]' 或改用离线模式") from e
+        litellm_module = litellm
+
+    def complete(prompt: str) -> str:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if api_key:
+            kwargs["api_key"] = api_key
+        response = litellm_module.completion(**kwargs)
+        message = response.choices[0].message
+        return message.content or ""
+
+    return complete
 
 
 def _sentences(text: str) -> list[str]:
@@ -108,8 +141,8 @@ class QuestionGenerator:
         prompt = (
             "你是 RAG 评测出题人。根据下面这篇文档出 {n} 道测试题,"
             "题型 distribution:事实问答/边界拒答/改写鲁棒大致均分。"
-            "只返回 JSON 数组,每项 {\"text\":题面,\"qtype\":factual|boundary|paraphrase,"
-            "\"expected\":参考答案(边界题为空字符串)}。\n文档标题:{t}\n文档内容:{c}"
+            "只返回 JSON 数组,每项 {{\"text\":题面,\"qtype\":factual|boundary|paraphrase,"
+            "\"expected\":参考答案(边界题为空字符串)}}。\n文档标题:{t}\n文档内容:{c}"
         ).format(n=n, t=doc.title, c=doc.content[:2000])
         raw = self.llm(prompt)
         items = json.loads(raw[raw.index("["): raw.rindex("]") + 1])
